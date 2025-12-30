@@ -1,5 +1,5 @@
 # Course Outline → Calendar Automation Tool
-A full-stack application that converts unstructured university course outlines into clean, calendar-ready academic schedules.
+A full-stack application that converts university course outlines into clean academic schedules and exports them as ICS files for direct import into Google Calendar, Apple Calendar, Outlook, and other calendar apps.
 
 ## Why This Exists
 Students often need to manually skim through lengthy course outlines to find lectures, deadlines, exams, and other important dates, then add each item to their calendar one by one. Doing this for multiple courses every semester is time-consuming and error-prone.
@@ -7,7 +7,7 @@ Students often need to manually skim through lengthy course outlines to find lec
 This tool is designed to save students time and mental effort by automating that process. Instead of manually extracting dates, students can upload a course outline PDF and receive a clean schedule that can be exported as an ICS file and imported directly into their calendar application of choice.
 
 ## What It Does
-- Extracts structured academic events from unstructured course outline text
+- Extracts structured academic events from structured or unstructured course outlines
 - Normalizes inconsistent naming and formatting across outlines
 - Deduplicates repeated events while preserving important details
 - Merges table-based and prose-based descriptions safely
