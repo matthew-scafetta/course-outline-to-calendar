@@ -1,4 +1,6 @@
 # Course Outline → Calendar Automation Tool
+
+![Preview](docs/preview.png)
 A full-stack application that converts university course outlines into clean academic schedules and exports them as ICS files for direct import into Google Calendar, Apple Calendar, Outlook, and other calendar apps.
 
 ## Why This Exists
