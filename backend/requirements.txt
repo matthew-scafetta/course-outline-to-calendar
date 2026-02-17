@@ -8,3 +8,4 @@ dateparser
 icalendar
 python-dotenv
 pdf2image
+pymupdf

@@ -1,22 +1,20 @@
-# main.py (fresh, clean, deterministic)
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import List, Optional
+
 import openai
 import json
 import re
 import os
 from datetime import datetime, timedelta
 from dateutil import parser as dt_parser
-import dateparser
 from icalendar import Calendar, Event, vRecur
 from dotenv import load_dotenv
 import base64
-from pdf2image import convert_from_bytes
-import io
 import hashlib
+import fitz
 
 # ============================================================
 # CONFIG
@@ -35,11 +33,12 @@ app = FastAPI(title="Course Outline Parser", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    # Tighten
+    allow_origins=["*"],  # Tighten
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # ============================================================
 # MODELS
@@ -50,14 +49,16 @@ class CourseEvent(BaseModel):
     description: Optional[str] = None
     event_type: str = "other"
     time: Optional[str] = None
-    recurrence: Optional[str] = None   # "WEEKLY"
+    recurrence: Optional[str] = None  # "WEEKLY"
     byday: Optional[List[str]] = None  # ["MO","WE"]
-    until: Optional[str] = None        # YYYY-MM-DD
+    until: Optional[str] = None  # YYYY-MM-DD
+
 
 class ParseResponse(BaseModel):
     events: List[CourseEvent]
     success: bool
     message: str
+
 
 # ============================================================
 # PROMPT
@@ -126,41 +127,86 @@ JSON SCHEMA:
 ]
 """.strip()
 
+
 # ============================================================
 # PARSING + NORMALIZATION HELPERS
 # ============================================================
-ALLOWED_TYPES = {"assignment","project","demo","report","quiz","exam","lab","presentation","other"}
-ALLOWED_BYDAY = {"MO","TU","WE","TH","FR","SA","SU"}
+ALLOWED_TYPES = {
+    "assignment",
+    "project",
+    "demo",
+    "report",
+    "quiz",
+    "exam",
+    "lab",
+    "presentation",
+    "other",
+}
+ALLOWED_BYDAY = {"MO", "TU", "WE", "TH", "FR", "SA", "SU"}
 
-WEEKDAY_MAP = {"MO":0,"TU":1,"WE":2,"TH":3,"FR":4,"SA":5,"SU":6}
+WEEKDAY_MAP = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
 WEEKDAY_NAME_TO_CODE = {
-    "monday":"MO","mon":"MO",
-    "tuesday":"TU","tue":"TU","tues":"TU",
-    "wednesday":"WE","wed":"WE",
-    "thursday":"TH","thu":"TH","thur":"TH","thurs":"TH",
-    "friday":"FR","fri":"FR",
-    "saturday":"SA","sat":"SA",
-    "sunday":"SU","sun":"SU",
+    "monday": "MO",
+    "mon": "MO",
+    "tuesday": "TU",
+    "tue": "TU",
+    "tues": "TU",
+    "wednesday": "WE",
+    "wed": "WE",
+    "thursday": "TH",
+    "thu": "TH",
+    "thur": "TH",
+    "thurs": "TH",
+    "friday": "FR",
+    "fri": "FR",
+    "saturday": "SA",
+    "sat": "SA",
+    "sunday": "SU",
+    "sun": "SU",
 }
 
 POLICY_KEYWORDS = [
-    "academic integrity", "integrity", "misconduct", "plagiarism",
-    "use of generative ai", "generative ai", "ai policy", "llm",
-    "policy", "policies", "guidelines",
-    "participation", "expectations",
-    "firing group", "fire group", "group members",
+    "academic integrity",
+    "integrity",
+    "misconduct",
+    "plagiarism",
+    "use of generative ai",
+    "generative ai",
+    "ai policy",
+    "llm",
+    "policy",
+    "policies",
+    "guidelines",
+    "participation",
+    "expectations",
+    "firing group",
+    "fire group",
+    "group members",
     "experiential learning",
-    "office hours", "contact", "email", "instructor",
-    "learning outcomes", "outcomes",
-    "resources", "textbook", "reading list",
+    "office hours",
+    "contact",
+    "email",
+    "instructor",
+    "learning outcomes",
+    "outcomes",
+    "resources",
+    "textbook",
+    "reading list",
 ]
 
 IMPORTANT_OTHER_KEYWORDS = [
-    "drop", "withdraw", "add", "last day",
-    "reading week", "no class", "holiday",
-    "course evaluation", "course eval",
+    "drop",
+    "withdraw",
+    "add",
+    "last day",
+    "reading week",
+    "no class",
+    "holiday",
+    "course evaluation",
+    "course eval",
     "exam period",
 ]
+
 
 def filter_events_min(events: List[CourseEvent]) -> List[CourseEvent]:
     kept = []
@@ -186,11 +232,14 @@ def filter_events_min(events: List[CourseEvent]) -> List[CourseEvent]:
 
     return kept
 
+
 def has_explicit_year(s: str) -> bool:
     return bool(re.search(r"\b(19|20)\d{2}\b", s or ""))
 
+
 def is_week_topic(title: str) -> bool:
     return bool(re.match(r"week\s*\d+", title.lower()))
+
 
 def normalize_time(raw: Optional[str]) -> Optional[str]:
     if not raw:
@@ -205,7 +254,10 @@ def normalize_time(raw: Optional[str]) -> Optional[str]:
     except Exception:
         return None
 
-def parse_date_keep_year_or_default(date_str: str, default_year: int) -> Optional[datetime]:
+
+def parse_date_keep_year_or_default(
+    date_str: str, default_year: int
+) -> Optional[datetime]:
     if not date_str:
         return None
     s = str(date_str).strip()
@@ -222,11 +274,13 @@ def parse_date_keep_year_or_default(date_str: str, default_year: int) -> Optiona
             dt = dt + timedelta(days=365)
     return dt
 
+
 def extract_week_ref(text: str) -> Optional[int]:
     if not text:
         return None
     m = re.search(r"\bweek\s*(\d{1,2})\b", text, re.IGNORECASE)
     return int(m.group(1)) if m else None
+
 
 def extract_weekday_code(text: str) -> Optional[str]:
     if not text:
@@ -237,7 +291,10 @@ def extract_weekday_code(text: str) -> Optional[str]:
             return code
     return None
 
-def compute_week_date(week1_start: datetime, week_num: int, weekday_code: Optional[str]) -> datetime:
+
+def compute_week_date(
+    week1_start: datetime, week_num: int, weekday_code: Optional[str]
+) -> datetime:
     week_start = week1_start.date() + timedelta(days=(week_num - 1) * 7)
     base = datetime.combine(week_start, datetime.min.time())
     if not weekday_code:
@@ -246,7 +303,10 @@ def compute_week_date(week1_start: datetime, week_num: int, weekday_code: Option
     delta = target - base.weekday()
     return base + timedelta(days=delta)
 
-def find_week1_anchor(events: List[CourseEvent], default_year: int) -> Optional[datetime]:
+
+def find_week1_anchor(
+    events: List[CourseEvent], default_year: int
+) -> Optional[datetime]:
     patterns = [
         r"\bclasses start\b",
         r"\bclass(es)? begin\b",
@@ -265,7 +325,10 @@ def find_week1_anchor(events: List[CourseEvent], default_year: int) -> Optional[
                     best = dt
     return best
 
-def normalize_events(events: List[CourseEvent], default_year: int = TARGET_YEAR) -> List[CourseEvent]:
+
+def normalize_events(
+    events: List[CourseEvent], default_year: int = TARGET_YEAR
+) -> List[CourseEvent]:
     week1_anchor = find_week1_anchor(events, default_year)
 
     out: List[CourseEvent] = []
@@ -298,7 +361,11 @@ def normalize_events(events: List[CourseEvent], default_year: int = TARGET_YEAR)
 
         # normalize byday
         if ev.byday and isinstance(ev.byday, list):
-            bd = [str(d).strip().upper() for d in ev.byday if str(d).strip().upper() in ALLOWED_BYDAY]
+            bd = [
+                str(d).strip().upper()
+                for d in ev.byday
+                if str(d).strip().upper() in ALLOWED_BYDAY
+            ]
             ev.byday = bd or None
         else:
             ev.byday = None
@@ -316,6 +383,7 @@ def normalize_events(events: List[CourseEvent], default_year: int = TARGET_YEAR)
         out.append(ev)
 
     return out
+
 
 # ============================================================
 # PARSE MODEL JSON
@@ -365,7 +433,10 @@ def parse_model_json(response_content: str) -> List[CourseEvent]:
         return events
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error parsing model JSON: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error parsing model JSON: {str(e)}"
+        )
+
 
 # ============================================================
 # UID + DEDUPE (merge-based, midterm-safe)
@@ -384,11 +455,12 @@ TYPE_PRIORITY = {
     "other": 0,
 }
 
+
 def _clean_text(s: str) -> str:
     s = (s or "").lower()
-    s = re.sub(r"\(.*?\)", " ", s)              # drop parentheticals
-    s = re.sub(r"no\.?\s*", "", s)              # "No. 1" -> "1"
-    s = re.sub(r"#\s*(\d+)", r" \1", s)        # "#1" -> " 1"
+    s = re.sub(r"\(.*?\)", " ", s)  # drop parentheticals
+    s = re.sub(r"no\.?\s*", "", s)  # "No. 1" -> "1"
+    s = re.sub(r"#\s*(\d+)", r" \1", s)  # "#1" -> " 1"
     s = re.sub(r"\b1st\b", " 1", s)
     s = re.sub(r"\b2nd\b", " 2", s)
     s = re.sub(r"\b3rd\b", " 3", s)
@@ -396,6 +468,7 @@ def _clean_text(s: str) -> str:
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
 
 def canonical_assessment_key(ev: CourseEvent) -> str:
     """
@@ -408,7 +481,11 @@ def canonical_assessment_key(ev: CourseEvent) -> str:
 
     # quick family detection
     is_midterm = "midterm" in blob
-    is_final_exam = ("final" in blob) and ("final report" not in blob) and (ev.event_type == "exam" or "exam" in blob)
+    is_final_exam = (
+        ("final" in blob)
+        and ("final report" not in blob)
+        and (ev.event_type == "exam" or "exam" in blob)
+    )
     is_quiz = "quiz" in blob
     is_test = ("test" in blob) and not is_midterm and not is_quiz
     is_exam = (ev.event_type == "exam") or ("exam" in blob)
@@ -439,6 +516,7 @@ def canonical_assessment_key(ev: CourseEvent) -> str:
     if is_exam:
         return f"exam-{num or 'x'}"
     return ""
+
 
 def normalize_midterm_numbers(events: List[CourseEvent]) -> List[CourseEvent]:
     """
@@ -474,22 +552,30 @@ def normalize_midterm_numbers(events: List[CourseEvent]) -> List[CourseEvent]:
             ev.title = f"Midterm {n}"
     return events
 
+
 def generate_event_uid(ev: CourseEvent) -> str:
     # Exams/quizzes/tests get a canonical title-part so variants hash the same
-    canon = canonical_assessment_key(ev) if (ev.event_type in {"exam", "quiz", "test"}) else ""
+    canon = (
+        canonical_assessment_key(ev)
+        if (ev.event_type in {"exam", "quiz", "test"})
+        else ""
+    )
     title_part = canon if canon else (ev.title or "").lower().strip()
 
-    base = "|".join([
-        title_part,
-        (ev.date or "").strip(),
-        (ev.time or "").strip(),
-        (ev.event_type or "other").strip().lower(),
-        (ev.recurrence or "").strip().upper(),
-        ",".join(ev.byday or []),
-        (ev.until or "").strip(),
-    ])
+    base = "|".join(
+        [
+            title_part,
+            (ev.date or "").strip(),
+            (ev.time or "").strip(),
+            (ev.event_type or "other").strip().lower(),
+            (ev.recurrence or "").strip().upper(),
+            ",".join(ev.byday or []),
+            (ev.until or "").strip(),
+        ]
+    )
     digest = hashlib.sha1(base.encode("utf-8")).hexdigest()
     return f"{digest}@course-outline-parser"
+
 
 def _normalize_title_for_merge(title: str) -> str:
     t = _clean_text(title or "")
@@ -505,9 +591,11 @@ def _normalize_title_for_merge(title: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
+
 def _split_sentences(text: str) -> List[str]:
     parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
     return [p.strip() for p in parts if p and p.strip()]
+
 
 def _merge_descriptions(a_desc: str, b_desc: str) -> str:
     a_sents = _split_sentences(a_desc)
@@ -531,7 +619,6 @@ def _merge_descriptions(a_desc: str, b_desc: str) -> str:
     return " ".join(out).strip()
 
 
-
 def _merge_two(a: CourseEvent, b: CourseEvent) -> CourseEvent:
     # time: prefer non-null
     if (not a.time) and b.time:
@@ -549,6 +636,7 @@ def _merge_two(a: CourseEvent, b: CourseEvent) -> CourseEvent:
     a.description = _merge_descriptions(a.description or "", b.description or "")
 
     return a
+
 
 def deduplicate_events(events: List[CourseEvent]) -> List[CourseEvent]:
     """
@@ -573,10 +661,13 @@ def deduplicate_events(events: List[CourseEvent]) -> List[CourseEvent]:
 
     return list(merged.values())
 
+
 # ============================================================
 # ICS GENERATION
 # ============================================================
-def events_to_ics(events: List[CourseEvent], filename: str = "course_schedule.ics") -> str:
+def events_to_ics(
+    events: List[CourseEvent], filename: str = "course_schedule.ics"
+) -> str:
     cal = Calendar()
     cal.add("prodid", "-//Course Outline Parser//example.com//")
     cal.add("version", "2.0")
@@ -614,15 +705,14 @@ def events_to_ics(events: List[CourseEvent], filename: str = "course_schedule.ic
 
         # RRULE
         if ev.recurrence == "WEEKLY" and ev.byday:
-            rule = vRecur({
-                "FREQ": "WEEKLY",
-                "BYDAY": ev.byday
-            })
+            rule = vRecur({"FREQ": "WEEKLY", "BYDAY": ev.byday})
 
             if ev.until:
                 udt = parse_date_keep_year_or_default(ev.until, TARGET_YEAR)
                 if udt:
-                    until_dt = datetime.combine(udt.date(), datetime.max.time().replace(microsecond=0))
+                    until_dt = datetime.combine(
+                        udt.date(), datetime.max.time().replace(microsecond=0)
+                    )
                     rule["UNTIL"] = until_dt
 
             e.add("rrule", rule)
@@ -633,6 +723,7 @@ def events_to_ics(events: List[CourseEvent], filename: str = "course_schedule.ic
         f.write(cal.to_ical())
 
     return filename
+
 
 # ============================================================
 # AI PROCESSING
@@ -651,22 +742,32 @@ async def process_file_with_ai(uploaded_file: UploadFile) -> List[CourseEvent]:
             resp = client.chat.completions.create(
                 model=MODEL_NAME,
                 messages=[
-                    {"role": "system", "content": "You extract course events from syllabi."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": create_ai_prompt()},
-                        {"type": "image_url", "image_url": {"url": data_url}}
-                    ]}
-                ]
+                    {
+                        "role": "system",
+                        "content": "You extract course events from syllabi.",
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": create_ai_prompt()},
+                            {"type": "image_url", "image_url": {"url": data_url}},
+                        ],
+                    },
+                ],
             )
             return (resp.choices[0].message.content or "").strip()
 
         if mime_type == "application/pdf":
-            images = convert_from_bytes(file_bytes)
-            for img in images:
-                buf = io.BytesIO()
-                img.save(buf, format="PNG")
-                model_text = call_model_on_image_bytes(buf.getvalue(), "image/png")
+            doc = fitz.open(stream=file_bytes, filetype="pdf")
+
+            for page in doc:
+                pix = page.get_pixmap(dpi=200)  # 200 DPI is good balance
+                img_bytes = pix.tobytes("png")
+
+                model_text = call_model_on_image_bytes(img_bytes, "image/png")
                 all_events.extend(parse_model_json(model_text))
+
+            doc.close()
 
         elif mime_type in ("image/png", "image/jpeg", "image/jpg"):
             img_mime = "image/jpeg" if "jp" in mime_type else "image/png"
@@ -674,8 +775,9 @@ async def process_file_with_ai(uploaded_file: UploadFile) -> List[CourseEvent]:
             all_events.extend(parse_model_json(model_text))
 
         else:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type}")
-
+            raise HTTPException(
+                status_code=400, detail=f"Unsupported file type: {mime_type}"
+            )
 
         # normalize -> dedupe
         all_events = normalize_events(all_events, default_year=TARGET_YEAR)
@@ -688,7 +790,10 @@ async def process_file_with_ai(uploaded_file: UploadFile) -> List[CourseEvent]:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file with AI: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Error processing file with AI: {str(e)}"
+        )
+
 
 # ============================================================
 # ENDPOINTS
@@ -696,14 +801,21 @@ async def process_file_with_ai(uploaded_file: UploadFile) -> List[CourseEvent]:
 @app.post("/upload-json", response_model=ParseResponse)
 async def upload_file_json(file: UploadFile = File(...)):
     events = await process_file_with_ai(file)
-    return ParseResponse(events=events, success=True, message=f"Extracted {len(events)} events")
+    print("OPENAI KEY LOADED:", bool(os.getenv("OPENAI_API_KEY")))
+    return ParseResponse(
+        events=events, success=True, message=f"Extracted {len(events)} events"
+    )
+
 
 @app.post("/upload-calendar")
 async def upload_file_calendar(file: UploadFile = File(...)):
     events = await process_file_with_ai(file)
     safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", file.filename)
     ics_path = events_to_ics(events, filename=f"{safe_name}_calendar.ics")
-    return FileResponse(ics_path, filename=f"{safe_name}_calendar.ics", media_type="text/calendar")
+    return FileResponse(
+        ics_path, filename=f"{safe_name}_calendar.ics", media_type="text/calendar"
+    )
+
 
 @app.get("/")
 async def root():
@@ -714,18 +826,21 @@ async def root():
             "upload_json": "/upload-json (POST)",
             "upload_calendar": "/upload-calendar (POST)",
             "health": "/health (GET)",
-            "docs": "/docs (GET)"
-        }
+            "docs": "/docs (GET)",
+        },
     }
+
 
 @app.get("/health")
 async def health_check():
     return {
         "status": "healthy",
         "openai_configured": bool(os.getenv("OPENAI_API_KEY")),
-        "message": "Course Parser API is running"
+        "message": "Course Parser API is running",
     }
+
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8001, reload=False)
