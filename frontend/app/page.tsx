@@ -50,7 +50,7 @@ export default function Page() {
     if (fileRef.current) fileRef.current.value = "";
   }
 
-  async function uploadJson() {
+  async function convert() {
     try {
       setError("");
       setStatus("");
@@ -60,7 +60,7 @@ export default function Page() {
       if (!file) throw new Error("Select a PDF or image first.");
 
       setBusy(true);
-      setStatus("Uploading… extracting events…");
+      setStatus("Uploading… converting to calendar events…");
 
       const form = new FormData();
       form.append("file", file);
@@ -78,38 +78,34 @@ export default function Page() {
 
       const parsed = body as ParseResponse;
       setData(parsed);
-      setStatus(`Extracted ${parsed.events?.length ?? 0} events.`);
+      setStatus(`Converted ${parsed.events?.length ?? 0} events. Ready to download.`);
     } catch (e: any) {
       setError(e?.message || "Something went wrong.");
     } finally {
       setBusy(false);
     }
   }
-
+  
   async function downloadIcs() {
     try {
       setError("");
       setStatus("");
 
-      if (!file) throw new Error("Select a PDF or image first.");
+      if (!data?.events?.length) {
+        throw new Error("Convert first so events are available.");
+      }
 
       setBusy(true);
-      setStatus("Uploading… generating calendar…");
+      setStatus("Generating calendar from extracted events…");
 
-      const form = new FormData();
-      form.append("file", file);
-
-      const res = await fetch("/api/upload-calendar", {
+      const res = await fetch(`/api/calendar-from-events`, {
         method: "POST",
-        body: form,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(data.events),
       });
 
       if (!res.ok) {
-        // try to parse error json/text
-        const ct = res.headers.get("content-type") || "";
-        const text = ct.includes("application/json")
-          ? JSON.stringify(await res.json())
-          : await res.text();
+        const text = await res.text();
         throw new Error(text || `Download failed (${res.status})`);
       }
 
@@ -118,13 +114,13 @@ export default function Page() {
 
       const a = document.createElement("a");
       a.href = url;
-      a.download = `${file.name}_calendar.ics`;
+      a.download = `${file?.name ?? "course"}_calendar.ics`;
       document.body.appendChild(a);
       a.click();
       a.remove();
 
       URL.revokeObjectURL(url);
-      setStatus("Downloaded calendar (.ics). Import it into Google Calendar.");
+      setStatus("Downloaded calendar (.ics). Import into Google Calendar.");
     } catch (e: any) {
       setError(e?.message || "Something went wrong.");
     } finally {
@@ -206,19 +202,19 @@ export default function Page() {
 
                 <div className="flex flex-wrap gap-3">
                   <button
-                    onClick={uploadJson}
+                    onClick={convert}
                     disabled={busy || !file}
                     className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-white/15 disabled:opacity-40"
                   >
-                    {busy ? "Working…" : "Extract JSON"}
+                    {busy ? "Working…" : "Convert"}
                   </button>
 
                   <button
                     onClick={downloadIcs}
-                    disabled={busy || !file}
+                    disabled={busy || !data?.events?.length}
                     className="rounded-2xl border border-white/10 bg-white/10 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-white/15 disabled:opacity-40"
                   >
-                    Download .ics
+                    Download
                   </button>
 
                   <button
@@ -266,7 +262,7 @@ export default function Page() {
               <div className="mt-3 text-xs text-white/60">Endpoints</div>
               <div className="mt-1 text-xs text-white/75">
                 <div>/api/upload-json → FastAPI /upload-json</div>
-                <div>/api/upload-calendar → FastAPI /upload-calendar</div>
+                <div>/api/calendar-from-events → FastAPI /calendar-from-events</div>
               </div>
             </div>
           </div>

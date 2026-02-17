@@ -1,8 +1,8 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import openai
 import json
@@ -665,15 +665,12 @@ def deduplicate_events(events: List[CourseEvent]) -> List[CourseEvent]:
 # ============================================================
 # ICS GENERATION
 # ============================================================
-def events_to_ics(
-    events: List[CourseEvent], filename: str = "course_schedule.ics"
-) -> str:
+def events_to_ics(events: List[CourseEvent]) -> bytes:
     cal = Calendar()
     cal.add("prodid", "-//Course Outline Parser//example.com//")
     cal.add("version", "2.0")
 
     for ev in events:
-        # Skip events without a resolved date (optional)
         if not ev.date:
             continue
 
@@ -682,13 +679,11 @@ def events_to_ics(
         e.add("summary", ev.title)
         e.add("description", ev.description or "")
 
-        # DTSTART/DTEND
         dt = parse_date_keep_year_or_default(ev.date, TARGET_YEAR)
         if not dt:
             continue
 
         if ev.time:
-            # timed event
             try:
                 t = dt_parser.parse(ev.time).time()
                 start_dt = datetime.combine(dt.date(), t)
@@ -699,11 +694,9 @@ def events_to_ics(
                 e.add("dtstart", dt.date())
                 e.add("dtend", dt.date() + timedelta(days=1))
         else:
-            # all-day event
             e.add("dtstart", dt.date())
             e.add("dtend", dt.date() + timedelta(days=1))
 
-        # RRULE
         if ev.recurrence == "WEEKLY" and ev.byday:
             rule = vRecur({"FREQ": "WEEKLY", "BYDAY": ev.byday})
 
@@ -719,10 +712,7 @@ def events_to_ics(
 
         cal.add_component(e)
 
-    with open(filename, "wb") as f:
-        f.write(cal.to_ical())
-
-    return filename
+    return cal.to_ical()
 
 
 # ============================================================
@@ -807,13 +797,20 @@ async def upload_file_json(file: UploadFile = File(...)):
     )
 
 
-@app.post("/upload-calendar")
-async def upload_file_calendar(file: UploadFile = File(...)):
-    events = await process_file_with_ai(file)
-    safe_name = re.sub(r"[^a-zA-Z0-9._-]+", "_", file.filename)
-    ics_path = events_to_ics(events, filename=f"{safe_name}_calendar.ics")
-    return FileResponse(
-        ics_path, filename=f"{safe_name}_calendar.ics", media_type="text/calendar"
+@app.post("/calendar-from-events")
+async def calendar_from_events(events: List[CourseEvent] = Body(...)):
+    # Optional: re-apply cleanup for safety/consistency
+    events = normalize_events(events, default_year=TARGET_YEAR)
+    events = filter_events_min(events)
+    events = normalize_midterm_numbers(events)
+    events = deduplicate_events(events)
+
+    ics_bytes = events_to_ics(events)
+
+    return Response(
+        content=ics_bytes,
+        media_type="text/calendar",
+        headers={"Content-Disposition": 'attachment; filename="course_schedule.ics"'},
     )
 
 

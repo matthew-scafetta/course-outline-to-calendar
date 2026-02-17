@@ -5,6 +5,7 @@ export const runtime = "nodejs";
 export async function POST(req: Request) {
   try {
     const base = process.env.FASTAPI_BASE_URL;
+
     if (!base) {
       return NextResponse.json(
         { error: "FASTAPI_BASE_URL is not set" },
@@ -12,31 +13,33 @@ export async function POST(req: Request) {
       );
     }
 
-    const incoming = await req.formData();
-    const file = incoming.get("file");
+    // Read JSON body from frontend
+    const events = await req.json();
 
-    if (!file || !(file instanceof File)) {
+    if (!Array.isArray(events)) {
       return NextResponse.json(
-        { error: "Missing 'file' in multipart/form-data" },
+        { error: "Invalid events payload" },
         { status: 400 }
       );
     }
 
-    const out = new FormData();
-    out.append("file", file, file.name);
-
-    const res = await fetch(`${base}/upload-calendar`, {
+    // Forward JSON to FastAPI
+    const res = await fetch(`${base}/calendar-from-events`, {
       method: "POST",
-      body: out,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(events),
     });
 
-    // Forward the ICS bytes as-is
+    // Forward ICS bytes directly back to browser
     const bytes = await res.arrayBuffer();
 
     const filename =
       res.headers
         .get("content-disposition")
-        ?.match(/filename="?([^"]+)"?/i)?.[1] || "course_calendar.ics";
+        ?.match(/filename="?([^"]+)"?/i)?.[1] ||
+      "course_schedule.ics";
 
     return new NextResponse(bytes, {
       status: res.status,
